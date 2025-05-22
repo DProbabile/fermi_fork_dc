@@ -115,7 +115,7 @@ class RelatednessMetrics(MatrixProcessorCA):
         Compute the taxonomy network from a bipartite network.
         Introduced by Zaccaria et al. (2014)
 
-        Parameters
+        Parameterss
         ----------
           - rows : bool, optional
               If True, compute taxonomy based on row to column to row transitions; otherwise column.
