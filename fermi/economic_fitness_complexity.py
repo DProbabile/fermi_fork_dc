@@ -5,7 +5,7 @@ from typing import Any, List, Union
 from pathlib import Path
 from scipy.sparse import csr_matrix, diags, vstack, hstack, issparse
 from scipy.sparse.linalg import eigs
-from .matrix_processor import MatrixProcessorCA
+from fermi.matrix_processor import MatrixProcessorCA
 
 class efc(MatrixProcessorCA):
     """
@@ -22,7 +22,9 @@ class efc(MatrixProcessorCA):
     The class supports sparse matrices, configurable initial conditions, and row/column labeling.
     """
 
-    def __init__(self) -> None:
+    def __init__(self,
+            input_data: Union[MatrixProcessorCA, str, Path, pd.DataFrame, np.ndarray, List[Any]] = None,
+            **kwargs) -> None:
         """
         Inizializes the efc class with a binary country-product matrix.
 
@@ -40,6 +42,23 @@ class efc(MatrixProcessorCA):
         """
         super().__init__()
 
+        self.shape = None
+        self._empty_metrics()
+
+        if input_data is not None:
+            if isinstance(input_data, MatrixProcessorCA):
+                # shallow‐copy lists so you don’t accidentally share them
+                self._original = (input_data._original[0].copy(), input_data._original[1].copy(), input_data._original[2].copy())
+                self._processed = input_data._processed.copy()
+                self.global_row_labels = input_data.global_row_labels
+                self.global_col_labels = input_data.global_col_labels
+                self.shape = self._processed.shape
+                self._set_labels()
+
+            else:
+                self.load(input_data, **kwargs)
+
+    def _empty_metrics(self):
         # Placeholders for fitness and complexity metrics
         self.fitness = None
         self.complexity = None
@@ -57,7 +76,12 @@ class efc(MatrixProcessorCA):
         # Placeholders for structural metrics
         self.density = None
         self.nodf = None
-        self.shape = None
+
+    def _set_labels(self):
+        if len(self.global_row_labels) == 0:
+            self.global_row_labels = list(range(self.shape[0]))
+        if len(self.global_col_labels) == 0:
+            self.global_col_labels = list(range(self.shape[1]))
 
     def load(
             self,
@@ -67,21 +91,8 @@ class efc(MatrixProcessorCA):
         super().load(input_data, **kwargs)
 
         self.shape = self._processed.shape
-        if len(self.global_row_labels) == 0:
-            self.global_row_labels = list(range(self.shape[0]))
-        if len(self.global_col_labels) == 0:
-            self.global_col_labels = list(range(self.shape[1]))
-
-        self.fitness = None
-        self.complexity = None
-        self.ubiquity = None
-        self.diversification = None
-        self.eci = None
-        self.pci = None
-        self.eci_eig = None
-        self.pci_eig = None
-        self.density = None
-        self.nodf = None
+        self._empty_metrics()
+        self._set_labels()
 
         return self
 
@@ -198,20 +209,20 @@ class efc(MatrixProcessorCA):
                          verbose: bool = False) -> tuple:
         """
         Compute the Economic Complexity Index (ECI) and Product Complexity Index (PCI)
-        using either the 'reflections' method or the 'spectral' method.
+        using either the 'reflections' method or the 'eigenvalue' method.
 
         Parameters
         ----------
           - method : str
-              Either 'reflections' for iterative method or 'spectral' for eigenvector-based method
+              Either 'reflections' for iterative method or 'eigenvalue' for eigenvector-based method
           - norm : str
               Normalization to apply to ECI/PCI ('sum', 'mean', etc.).
           - max_iterations : int
               Number of iterations to run for reflections method.
           - eigv : bool
-              If True and using 'spectral', also return eigenvectors.
+              If True and using 'eigenvalue', also return eigenvectors.
           - verbose : bool
-              If True, print debugging info (only for 'spectral').
+              If True, print debugging info (only for 'eigenvalue').
 
         Returns
         -------
@@ -222,10 +233,10 @@ class efc(MatrixProcessorCA):
             raise TypeError("matrix must be CSR for ECI/PCI computation")
         if method == 'reflections':
             return self._method_of_reflections(matrix, norm, max_iterations)
-        elif method == 'spectral':
+        elif method == 'eigenvalue':
             return self._eci_pci_from_eigs(matrix, norm, eigv, verbose)
         else:
-            raise ValueError(f"Unsupported method '{method}' choose 'reflections' or 'spectral'")
+            raise ValueError(f"Unsupported method '{method}' choose 'reflections' or 'eigenvalue'")
 
     def _method_of_reflections(self, matrix, norm: str = 'zscore', max_iterations: int = 10) -> tuple:
         """
@@ -280,7 +291,7 @@ class efc(MatrixProcessorCA):
 
     def _eci_pci_from_eigs(self, matrix, norm: str = 'zscore', eigv: bool = False, verbose: bool = False) -> tuple:
         """
-        Compute ECI and PCI based on the spectral method introduced by Cristelli et al. (2013).
+        Compute ECI and PCI based on the eigenvalue method introduced by Cristelli et al. (2013).
 
         This method uses the second-largest eigenvectors of the country–country (Mcc)
         and product–product (Mpp) projection matrices derived from the normalized
@@ -311,12 +322,14 @@ class efc(MatrixProcessorCA):
 
         # Normalize Mcp by diversification (rows) to get Pcp
         div = diversification.astype(float)
-        inverse_div = diags(np.where(div != 0, 1.0 / div, 0.0))
+        with np.errstate(divide='ignore'):
+            inverse_div = diags(np.where(div != 0, 1.0 / div, 0.0))
         Pcp = inverse_div.dot(Mcp)  # shape: (n_countries, n_products)
 
         # Normalize Mcp by ubiquity (columns) to get Ppc
         ubi = ubiquity.astype(float)
-        inverse_ubi = diags(np.where(ubi != 0, 1.0 / ubi, 0.0))
+        with np.errstate(divide='ignore'):
+            inverse_ubi = diags(np.where(ubi != 0, 1.0 / ubi, 0.0))
         Mpc = Mcp.transpose()  # shape: (n_products, n_countries)
         Ppc = inverse_ubi.dot(Mpc)  # normalize rows = columns of Mcp
 
@@ -583,91 +596,167 @@ class efc(MatrixProcessorCA):
 
         return fit[newpos], com[newpos]
     
+    def _compute_overlap_and_degrees(self):
+        """
+        Precompute matrix A, row/column degrees, overlaps and dimensions.
+        """
+        if issparse(self._processed):
+            A = self._processed.toarray()
+        else:
+            A = self._processed
+
+        k_r = A.sum(axis=1)        # Degrees of rows
+        O_r = A.dot(A.T)           # Overlap between rows
+        k_c = A.sum(axis=0)        # Degrees of columns
+        O_c = A.T.dot(A)           # Overlap between columns
+        N, M = A.shape             # Matrix dimensions
+
+        return A, k_r, O_r, k_c, O_c, N, M
+
     def _NODF(self) -> float:
         """
-        Compute the metric Nestedness Overlap and Decreasing Fill (NODF) of a binary matrix.
+        Compute the Nestedness metric based on Overlap and Decreasing Fill (NODF) for a binary matrix.
+
+        The NODF quantifies how much the presence of 1s (interactions) in rows and columns 
+        of a binary matrix are nested — that is, how much the set of 1s in a lower-degree 
+        row or column is contained in a higher-degree one.
+
+        To compute the row nestedness the key components are:
+        - overlap_rows[i, j]: the number of 1s that rows i and j have in common 
+                         (i.e., the number of columns where both have a 1).
+        - k_j: the number of 1s in row j — considered the "poorer" row of the pair 
+               (i.e., the one with fewer 1s).
+
+        For each valid pair of rows (i, j) such that k_i > k_j > 0, the nestedness contribution is:
+            N^R[i,j] = overlap[i, j] / k_j   iff   k_i > k_j > 0
+
+        This ratio measures how much of the poorer row is contained within the richer one.
+
+        Example of overlap_rows:
+        Let A be:
+            A = [[1, 1, 0],
+                 [1, 0, 1],
+                 [0, 1, 1]]
+
+            A.dot(A.T) = overlap_rows:
+            [[1*1 + 1*1 + 0*0,   1*1 + 1*0 + 0*1,   1*0 + 1*1 + 0*1],
+             [1*1 + 0*1 + 1*0,   1*1 + 0*0 + 1*1,   1*0 + 0*1 + 1*1],
+             [0*1 + 1*1 + 1*0,   0*1 + 1*0 + 1*1,   0*0 + 1*1 + 1*1]]   
+
+            Then it follows that:
+            [[2, 1, 1],
+             [1, 2, 1],
+             [1, 1, 2]]
+    
+        For instance, rows 0 and 1 share a single 1 in column 0, 
+        so overlap_rows[0, 1] = 1.
+        The same logic is applied to column nestedness and NODF is obtained:
+        
+        NODF = 0.5 * (N^R / \binom{N}{2} + N^C / \binom{M}{2})
 
         Returns
         -------
           - NODF: float
               Scalar NODF value.
         """
-        if issparse(self._processed):
-            A = self._processed.toarray()
-        N,M = A.shape
-        
-        # Row degrees k_i and row‐overlaps O_{ij}
-        overlap_rows = A.dot(A.T)
-        k_rows  = A.sum(axis=1)
-        
-        # Col degrees k_α and row‐overlaps O_{αβ}
-        overlap_cols = A.T.dot(A)
-        k_cols  = A.sum(axis=0)  
+        print("Computing NODF...")       
+        #####   Row degrees k_i and row‐overlaps O_{ij}   #####
+        # overlap_rows[i,j] counts how many active entries (1) have columns i and j in common       
+        _, k_rows, overlap_rows, k_cols, overlap_cols, N, M = self._compute_overlap_and_degrees()
 
         # N^R = sum_{i,j : k_i > k_j > 0} (O_ij / k_j)
-        i_r = k_rows.reshape(-1, 1)  # shape (N,1)
-        j_r = k_rows.reshape(1, -1)  # shape (1,N)
+        i_r = k_rows[:, np.newaxis]  # i_r[i, j] = k_i --> column vector of row degrees with shape (N,1)
+        j_r = k_rows[np.newaxis, :] # j_r[i, j] = k_j --> row vector of row degrees with shape (1,N)
+        j_mat_r = np.broadcast_to(j_r, (len(k_rows), len(k_rows)))  # shape: (N, N)
 
-        mask_r = (i_r > j_r) & (j_r > 0)       # only pairs with strictly larger degree
-        N_R = np.sum(overlap_rows[mask_r] / j_r[mask_r])
+        # mask_r[i,j] = True if row i has more 1s of row j AND k_j > 0 so row j has at least one 1
+        mask_r = (i_r > j_r) & (j_r > 0)    
+        N_R = np.sum(overlap_rows[mask_r] / j_mat_r[mask_r])  # row nestedness
 
-        # N^C = sum_{α,β : k_α > k_β > 0} (O_αβ / k_β)
-        i_c = k_cols.reshape(-1, 1)  # shape (M,1)
-        j_c = k_cols.reshape(1, -1)  # shape (1,M) 
-
-        mask_c = (i_c > j_c) & (j_c > 0)       # only pairs with strictly larger degree
-        N_C = np.sum(overlap_cols[mask_c] / j_c[mask_c])
+        # Same logic as above, but for columns 
+        i_c = k_cols.reshape(-1, 1)   
+        j_c = k_cols.reshape(1, -1)   
+        j_mat_c = np.broadcast_to(j_c, (len(k_cols), len(k_cols)))
+        
+        mask_c = (i_c > j_c) & (j_c > 0)       
+        N_C = np.sum(overlap_cols[mask_c] / j_mat_c[mask_c])  # column nestedness
 
         denom_R = N * (N - 1) / 2
         denom_C = M * (M - 1) / 2
 
-        NODF = (N_R / denom_R + N_C / denom_C) / 2.
-
+        NODF = 0.5 * (N_R / denom_R + N_C / denom_C)
+        
         return NODF
     
     def _S_NODF(self) -> float:
         """
-        Compute the metric Stable NODF (S-NODF) of a binary matrix.
+        Compute the Stable Nestedness metric (S-NODF) for a binary matrix.
+
+        The S-NODF quantifies how much the presence of 1s (interactions) in rows and columns 
+        of a binary matrix are nested — similarly to NODF — but uses a more robust criterion 
+        by comparing all distinct pairs of rows (or columns), regardless of whether one has 
+        strictly more 1s than the other.
+
+        To compute the row nestedness the key components are:
+        - overlap_rows[i, j]: the number of 1s that rows i and j have in common 
+                            (i.e., the number of columns where both have a 1).
+        - min(k_i, k_j): the minimum number of 1s between rows i and j.
+
+        For each distinct pair of rows (i, j) such that min(k_i, k_j) > 0, the nestedness contribution is:
+            eta^R[i,j] = overlap[i, j] / min(k_i, k_j)   iff   i < j and min(k_i, k_j) > 0
+
+        This ratio measures how much the smaller row (in terms of number of 1s) is contained 
+        within the larger one — or, more generally, how much overlap exists relative to their size.
+
+        Example of overlap_rows:
+        Let A be:
+            A = [[1, 1, 0],
+                [1, 0, 1],
+                [0, 1, 1]]
+
+            A.dot(A.T) = overlap_rows:
+            [[1*1 + 1*1 + 0*0,   1*1 + 1*0 + 0*1,   1*0 + 1*1 + 0*1],
+            [1*1 + 0*1 + 1*0,   1*1 + 0*0 + 1*1,   1*0 + 0*1 + 1*1],
+            [0*1 + 1*1 + 1*0,   0*1 + 1*0 + 1*1,   0*0 + 1*1 + 1*1]]   
+
+            Then it follows that:
+            [[2, 1, 1],
+            [1, 2, 1],
+            [1, 1, 2]]
+        
+        For instance, rows 0 and 1 share a single 1 in column 0, 
+        so overlap_rows[0, 1] = 1. Their degrees are both 2, so:
+            eta^R[0,1] = 1 / min(2,2) = 0.5
+
+        The same logic is applied to column nestedness, and the final value is computed as:
+        
+        S_NODF = (eta^R + eta^C) / (\binom{N}{2} + \binom{M}{2})
 
         Returns
         -------
-          - S_NODF: float
-              Scalar S-NODF value.
+        - S_NODF: float
+            Scalar Stable NODF value.
         """
+        print("Computing S-NODF...")
+        _, k_r, O_r, k_c, O_c, N, M = self._compute_overlap_and_degrees()
 
-        if issparse(self._processed):
-            A = self._processed.toarray()
-                
-        # Row degrees k_i and row‐overlaps O_{ij}
-        k_r = A.sum(axis=1)                 
-        O_r = A.dot(A.T) 
-        N = A.shape[0]              
-
-        # Col degrees k_α and row‐overlaps O_{αβ}
-        k_c = A.sum(axis=0)
-        O_c = A.T.dot(A)     
-        M = A.shape[1]
-
-        # Mask to avoid double counting: only i<j terms 
-        triu_r = np.triu_indices(N, k=1)  # k = 1 not consider diagonal
-        triu_c = np.triu_indices(M, k=1)  # k = 1 not consider diagonal
-
-        # Matrix of minima for rows
-        i_r = k_r.reshape(-1, 1)
-        j_r = k_r.reshape(1, -1)
-        min_r = np.minimum(i_r, j_r) 
+        # --- Rows ---
+        triu_r = np.triu_indices(N, k=1)
+        i_r = k_r[:, np.newaxis]
+        j_r = k_r[np.newaxis, :]
+        min_r = np.minimum(i_r, j_r)
         valid_r = min_r[triu_r] > 0
+        eta_R = np.sum(O_r[triu_r][valid_r] / min_r[triu_r][valid_r])
 
-        # Matrix of minima for cols
-        i_c = k_c.reshape(-1, 1)
-        j_c = k_c.reshape(1, -1)
+        # --- Columns ---
+        triu_c = np.triu_indices(M, k=1)
+        i_c = k_c[:, np.newaxis]
+        j_c = k_c[np.newaxis, :]
         min_c = np.minimum(i_c, j_c)
-        valid_c = min_c[triu_c] > 0     
-
-        eta_R = np.sum(O_r[triu_r][valid_r] / min_r[triu_r][valid_r])        
+        valid_c = min_c[triu_c] > 0
         eta_C = np.sum(O_c[triu_c][valid_c] / min_c[triu_c][valid_c])
 
-        denom_R = N * (N - 1) / 2   
+        denom_R = N * (N - 1) / 2
         denom_C = M * (M - 1) / 2
 
         S_NODF = (eta_R + eta_C) / (denom_R + denom_C)
@@ -691,7 +780,7 @@ class efc(MatrixProcessorCA):
               If True, forces recomputation of fitness and complexity even if cached.
           - aspandas : bool, default False
               If True, returns results as pandas DataFrames with appropriate labels.
-          - **kwargs : dict
+          - `**kwargs` : dict
               Additional keyword arguments passed to the internal _fitness_complexity() method.
 
         Returns
@@ -754,7 +843,7 @@ class efc(MatrixProcessorCA):
 
     def get_eci_pci(
         self,
-        method: str = 'reflections',
+        method: str = 'eigenvalue',
         norm: str = 'zscore',
         max_iterations: int = 18,
         eigv: bool = False,
@@ -770,16 +859,16 @@ class efc(MatrixProcessorCA):
 
         Parameters
         ----------
-          - method : {'reflections', 'spectral'}
+          - method : {'reflections', 'eigenvalue'}
               Choice of algorithm.
           - norm : str
               How to normalize the output vectors.
           - max_iterations : int
               Only for 'reflections'.
           - eigv : bool
-              Only for 'spectral': if True, also return eigenvectors.
+              Only for 'eigenvalue': if True, also return eigenvectors.
           - verbose : bool
-              Only for 'spectral': print debug info.
+              Only for 'eigenvalue': print debug info.
           - force : bool
               If True, recompute even if cached.
           - aspandas : bool
@@ -790,7 +879,7 @@ class efc(MatrixProcessorCA):
           - tuple: (eci, pci)
               Two arrays if eigv=False.
           - tuple: (eci, eci_eig, pci, pci_eig)
-              Four arrays if eigv=True and method='spectral'.
+              Four arrays if eigv=True and method='eigenvalue'.
         """
         # Recompute if needed
         if self.eci is None or self.pci is None or force:
@@ -802,7 +891,7 @@ class efc(MatrixProcessorCA):
                     norm=norm,
                     max_iterations=max_iterations
                 )
-            else:  # spectral
+            else:  # eigenvalue
                 if eigv:
                     self.eci, self.eci_eig, self.pci, self.pci_eig = self._eci_pci_indices(
                         self._processed,
@@ -827,7 +916,7 @@ class efc(MatrixProcessorCA):
             return eci_df, pci_df
 
         # Return numpy arrays (2 or 4)
-        if method == 'spectral' and eigv:
+        if method == 'eigenvalue' and eigv:
             return self.eci, self.eci_eig, self.pci, self.pci_eig
         else:
             return self.eci, self.pci
@@ -842,7 +931,7 @@ class efc(MatrixProcessorCA):
               If True, forces recomputation even if already cached.
           - aspandas : bool, default False
               If True, returns results as pandas DataFrames.
-          - **kwargs : dict
+          - `**kwargs` : dict
               Additional parameters forwarded to _eci_pci_indices().
 
         Returns
@@ -880,7 +969,7 @@ class efc(MatrixProcessorCA):
             self.density = self._processed.nnz / (self.shape[0] * self.shape[1])
         return self.density
     
-    def get_nodf(self, force: bool = False) -> float:
+    def get_nodf(self, force: bool = False, nodf_method: str = 'nodf') -> float:
         """
         Computes the Nestedness metric (NODF) of the binary matrix.
 
@@ -889,15 +978,25 @@ class efc(MatrixProcessorCA):
 
         Parameters
         ----------
-        None
-
+          - force : bool, default False
+                If True, forces recomputation of NODF even if already cached.
+          - nodf_method : str, default 'nodf'
+                Method to compute NODF: 'nodf' for standard NODF, 's_nodf' for Stable NODF.
         Returns
         -------
-          - float
-              Scalar NODF value.
+          - self.nodf : float
+                Scalar NODF value.
+        Raises  
+        ------
+            - ValueError If an invalid nodf_method is provided.
         """
         if self.nodf is None or force:
-            self.nodf = _nodf(self._processed)
+            if nodf_method == 'nodf':
+                self.nodf = self._NODF()
+            elif nodf_method == 's_nodf':   
+                self.nodf = self._S_NODF()
+            else:
+                raise ValueError("Invalid nodf_method. Use 'nodf' or 's_nodf'.")
         return self.nodf
 
     def plot_matrix(self,
