@@ -175,8 +175,12 @@ class efc(MatrixProcessorCA):
             return vector / vector.sum(0)
         elif normalization == 'max':
             return vector / vector.max(0)
+        elif normalization == 'min':
+            return vector / vector.min(0)
         elif normalization == 'mean':
             return vector / vector.mean(0)
+        elif normalization == 'none':
+            return vector
         elif normalization == 'zscore':
             vec = (vector - vector.mean(0)) / vector.std(0)
             eps = np.finfo(float).eps
@@ -538,6 +542,8 @@ class efc(MatrixProcessorCA):
 
         # Main iterative loop
         for iterat in range(max_iteration):
+            if verbose and iterat == 0:
+                print(">>> convergence threshold (min_distance):", min_distance)
 
             # colpos selects which past iteration to read from (rolling buffer)
             colpos = iterat % tail
@@ -581,15 +587,16 @@ class efc(MatrixProcessorCA):
                 if (iterat % 8 == 7) and (iterat > max_iteration // 10):
                     T = self._minimum_crossing_time(fit, iterat, tail)
                     if T + iterat + 1 > max_iteration:  # if the next swap is expected after max_iteration stop
+                        if verbose:
+                            print("iteration:", iterat, "crossing time:", T)
                         break
 
             elif check_stop == 'distance':
                 distance = np.abs(fit[newpos] - fit[colpos]).sum()
-                if verbose:
-                    print("iteration:", iterat, "L1 convergence:", distance)
-                if iterat > max_iteration // 10:
-                    if distance < min_distance:
-                        break
+                if iterat > max_iteration // 10 and distance < min_distance:
+                    if verbose:
+                        print(f">>> Breaking at iter {iterat} (L1 convergence: {distance:.2e} < {min_distance})")
+                    break
 
         if normalization == 'sum' and not with_dummy:
             return fit[newpos] * dim[0], com[newpos] * dim[1]
@@ -659,7 +666,7 @@ class efc(MatrixProcessorCA):
           - NODF: float
               Scalar NODF value.
         """
-        print("Computing NODF...")       
+        #print("Computing NODF...")
         #####   Row degrees k_i and row‐overlaps O_{ij}   #####
         # overlap_rows[i,j] counts how many active entries (1) have columns i and j in common       
         _, k_rows, overlap_rows, k_cols, overlap_cols, N, M = self._compute_overlap_and_degrees()
@@ -737,7 +744,7 @@ class efc(MatrixProcessorCA):
         - S_NODF: float
             Scalar Stable NODF value.
         """
-        print("Computing S-NODF...")
+        #print("Computing S-NODF...")
         _, k_r, O_r, k_c, O_c, N, M = self._compute_overlap_and_degrees()
 
         # --- Rows ---
